@@ -109,6 +109,27 @@ struct FetchModelView: View {
     }
 }
 
+// Full-screen export page opened from the hamburger button
+struct FilesScreen: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationView {
+            FetchModelView()
+                .navigationTitle("Exports")
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button(action: { dismiss() }) {
+                            Image(systemName: "xmark")
+                        }
+                        .accessibilityLabel("Close")
+                    }
+                }
+        }
+        .navigationViewStyle(.stack)
+    }
+}
+
 struct FetchModelView_Previews: PreviewProvider {
     static var previews: some View {
         FetchModelView()
