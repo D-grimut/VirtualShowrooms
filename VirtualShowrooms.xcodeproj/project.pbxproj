@@ -15,7 +15,8 @@
 		BEE474422A15C1BC003C2653 /* Mesh+Ext.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEE474412A15C1BC003C2653 /* Mesh+Ext.swift */; };
 		BEE474452A16027A003C2653 /* scanned.obj in Resources */ = {isa = PBXBuildFile; fileRef = BEE474442A16027A003C2653 /* scanned.obj */; };
 		BEE474472A16069F003C2653 /* FetchModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEE474462A16069F003C2653 /* FetchModel.swift */; };
-		BEE474512A16069F003C2653 /* AreaCaptureFlow.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEE474502A16069F003C2653 /* AreaCaptureFlow.swift */; };
+		BEE474512A16069F003C2653 /* PotholeScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEE474502A16069F003C2653 /* PotholeScanner.swift */; };
+		BEE474532A16069F003C2653 /* PotholeAnalysis.swift in Sources */ = {isa = PBXBuildFile; fileRef = BEE474522A16069F003C2653 /* PotholeAnalysis.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,7 +30,8 @@
 		BEE474432A15D090003C2653 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		BEE474442A16027A003C2653 /* scanned.obj */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text; path = scanned.obj; sourceTree = "<group>"; };
 		BEE474462A16069F003C2653 /* FetchModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FetchModel.swift; sourceTree = "<group>"; };
-		BEE474502A16069F003C2653 /* AreaCaptureFlow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AreaCaptureFlow.swift; sourceTree = "<group>"; };
+		BEE474502A16069F003C2653 /* PotholeScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PotholeScanner.swift; sourceTree = "<group>"; };
+		BEE474522A16069F003C2653 /* PotholeAnalysis.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PotholeAnalysis.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -66,7 +68,8 @@
 				BEE474312A15C04D003C2653 /* VirtualShowroomsApp.swift */,
 				BEE474332A15C04D003C2653 /* ContentView.swift */,
 				BEE4743F2A15C123003C2653 /* ARWrapper.swift */,
-				BEE474502A16069F003C2653 /* AreaCaptureFlow.swift */,
+				BEE474502A16069F003C2653 /* PotholeScanner.swift */,
+				BEE474522A16069F003C2653 /* PotholeAnalysis.swift */,
 				BEE474462A16069F003C2653 /* FetchModel.swift */,
 				BEE474412A15C1BC003C2653 /* Mesh+Ext.swift */,
 				BEE474352A15C04E003C2653 /* Assets.xcassets */,
@@ -156,7 +159,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				BEE474472A16069F003C2653 /* FetchModel.swift in Sources */,
-				BEE474512A16069F003C2653 /* AreaCaptureFlow.swift in Sources */,
+				BEE474512A16069F003C2653 /* PotholeScanner.swift in Sources */,
+				BEE474532A16069F003C2653 /* PotholeAnalysis.swift in Sources */,
 				BEE474402A15C123003C2653 /* ARWrapper.swift in Sources */,
 				BEE474342A15C04D003C2653 /* ContentView.swift in Sources */,
 				BEE474422A15C1BC003C2653 /* Mesh+Ext.swift in Sources */,
@@ -293,7 +297,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = VirtualShowrooms/Info.plist;
-				INFOPLIST_KEY_NSCameraUsageDescription = "The camera and LiDAR scanner are used to scan rooms into 3D models.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "The camera and LiDAR scanner are used to measure potholes in 3D.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -324,7 +328,7 @@
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = VirtualShowrooms/Info.plist;
-				INFOPLIST_KEY_NSCameraUsageDescription = "The camera and LiDAR scanner are used to scan rooms into 3D models.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "The camera and LiDAR scanner are used to measure potholes in 3D.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

@@ -10,7 +10,8 @@ import RealityKit
 import ARKit
 
 struct ARViewWrapper: UIViewRepresentable {
-    @ObservedObject var controller: ScanController
+    // not observed: the ARView never needs updating from published state
+    let controller: ScanController
 
     func makeUIView(context: Context) -> ARView {
         return controller.arView
@@ -19,28 +20,58 @@ struct ARViewWrapper: UIViewRepresentable {
     func updateUIView(_ uiView: ARView, context: Context) { }
 }
 
-// Owns the ARView and the scan lifecycle (start -> stop -> export/discard)
+// Owns the ARView and the pothole scan lifecycle:
+// idle -> locating the road surface -> scanning (depth fusion) -> analysing -> result -> save/discard
 final class ScanController: NSObject, ObservableObject, ARSessionDelegate {
-    @Published var isScanning = false
-    @Published var isFinalizing = false
-    @Published var showConfirm = false
-    @Published var trackingState: ARCamera.TrackingState = .notAvailable
-    // set when tracking degraded mid-scan, which makes the mesh drift
-    @Published var hadLimitedTracking = false
+    enum Phase {
+        case idle
+        case locatingSurface
+        case scanning
+        case analyzing
+        case result(PotholeResult)
+        case failed(String)
+    }
+
+    @Published private(set) var phase: Phase = .idle
+    @Published private(set) var trackingState: ARCamera.TrackingState = .notAvailable
     // metres from the camera to the surface at screen centre (high-confidence LiDAR only)
-    @Published var distanceToSurface: Float?
+    @Published private(set) var distanceToSurface: Float?
+    @Published private(set) var movingTooFast = false
+    @Published private(set) var framesIntegrated = 0
+    @Published private(set) var coveragePreview: UIImage?
 
     let arView = ARView(frame: .zero)
-    // scene reconstruction needs LiDAR (iPhone 12 Pro and newer Pro models, LiDAR iPads)
-    let isSupported = ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh)
+    // raw LiDAR depth needs a LiDAR device (iPhone 12 Pro and newer Pro models, LiDAR iPads)
+    let isSupported = ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth)
 
-    private var pendingAnchors: [ARMeshAnchor] = []
-    private var lastDepthSample: TimeInterval = 0
+    var isCapturing: Bool {
+        switch phase {
+        case .locatingSurface, .scanning: return true
+        default: return false
+        }
+    }
+
+    // fusion runs off the main thread; `grid` and `lastPreview` are only touched on this queue
+    private let processing = DispatchQueue(label: "VirtualShowrooms.pothole-fusion", qos: .userInitiated)
+    private var grid: HeightmapGrid?
+    private var lastPreview: TimeInterval = 0
+
+    // main thread only
+    private var isBusy = false
+    private var lastPose: (time: TimeInterval, transform: simd_float4x4)?
+    private var lastDistanceSample: TimeInterval = 0
+    // bumped on every reset so an in-flight frame from an earlier scan can't change the new one
+    private var scanGeneration = 0
+    // published to the UI only with each coverage preview, so SwiftUI doesn't re-render every frame
+    private var fusedFrames = 0
+
+    // depth and pose drift apart when moving fast, which smears the heightmap
+    private static let maxSpeed: Float = 0.35          // m/s
+    private static let maxAngularSpeed: Float = .pi / 4 // 45°/s
 
     override init() {
         super.init()
         arView.automaticallyConfigureSession = false
-        arView.debugOptions.insert(.showSceneUnderstanding)
         arView.session.delegate = self
 
         let coaching = ARCoachingOverlayView()
@@ -56,75 +87,85 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate {
 
     func start() {
         guard isSupported else { return }
-        clearPending()
-        hadLimitedTracking = false
+        resetScanState()
         arView.session.run(buildConfigure(), options: [.resetTracking, .removeExistingAnchors])
-        isScanning = true
+        phase = .locatingSurface
     }
 
     func stop() {
-        isScanning = false
-        isFinalizing = true
-        // ARKit keeps refining the most recently seen area for a moment; let it settle before capturing
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+        guard case .scanning = phase else {
+            // stopped before the surface was found: nothing to analyse
+            discard()
+            return
+        }
+        phase = .analyzing
+        let frames = fusedFrames
+        processing.async { [weak self] in
             guard let self else { return }
-            if let frame = self.arView.session.currentFrame {
-                self.pendingAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
+            let outcome: Result<PotholeResult, Error>
+            if let grid = self.grid {
+                outcome = Result { try PotholeAnalyzer.analyze(grid: grid, framesIntegrated: frames) }
+            } else {
+                outcome = .failure(PotholeAnalysisError.notEnoughData)
             }
-            self.arView.session.pause()
-            self.distanceToSurface = nil
-            self.isFinalizing = false
-            self.showConfirm = true
+            DispatchQueue.main.async {
+                self.arView.session.pause()
+                switch outcome {
+                case .success(let result): self.phase = .result(result)
+                case .failure(let error): self.phase = .failed(error.localizedDescription)
+                }
+            }
         }
     }
 
-    func export(name: String) {
-        let vm = ExportViewModel()
-        if let asset = vm.convertToAsset(meshAnchors: pendingAnchors) {
+    func save(name: String) {
+        guard case .result(let result) = phase else { return }
+        phase = .analyzing
+        processing.async { [weak self] in
+            var failure: String?
             do {
-                try vm.export(asset: asset, fileName: name)
+                try PotholeExporter.save(result, name: name)
             } catch {
-                print("Export error")
+                failure = "Couldn't save the scan: \(error.localizedDescription)"
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let failure {
+                    self.phase = .failed(failure)
+                } else {
+                    self.discard()
+                }
             }
         }
-        finishConfirm()
     }
 
     func discard() {
-        finishConfirm()
-    }
-
-    // Object Capture needs the camera to itself
-    func suspendPreview() {
-        arView.session.pause()
-    }
-
-    func resumePreview() {
+        resetScanState()
+        phase = .idle
+        // back to plain camera preview
         arView.session.run(ARWorldTrackingConfiguration(), options: [.resetTracking, .removeExistingAnchors])
     }
 
-    private func finishConfirm() {
-        clearPending()
-        showConfirm = false
-        // back to plain camera preview, dropping the scanned mesh
-        resumePreview()
-    }
-
-    private func clearPending() {
-        pendingAnchors = []
+    private func resetScanState() {
+        scanGeneration += 1
+        fusedFrames = 0
+        framesIntegrated = 0
+        coveragePreview = nil
+        distanceToSurface = nil
+        movingTooFast = false
+        lastPose = nil
+        processing.async { [weak self] in
+            self?.grid = nil
+            self?.lastPreview = 0
+        }
     }
 
     private func buildConfigure() -> ARWorldTrackingConfiguration {
         let configuration = ARWorldTrackingConfiguration()
-
-        // no environment probes or classification: they cost CPU/GPU and aren't exported
+        // raw (unsmoothed) depth: our own multi-frame averaging replaces ARKit's temporal smoothing
+        configuration.frameSemantics = .sceneDepth
+        // no scene mesh, environment probes or plane anchors: they cost CPU/GPU and aren't used
         configuration.environmentTexturing = .none
-        configuration.sceneReconstruction = .mesh
-
-        if type(of: configuration).supportsFrameSemantics(.smoothedSceneDepth) {
-            configuration.frameSemantics = .smoothedSceneDepth
-        }
-
         return configuration
     }
 
@@ -132,92 +173,73 @@ final class ScanController: NSObject, ObservableObject, ARSessionDelegate {
 
     func session(_ session: ARSession, cameraDidChangeTrackingState camera: ARCamera) {
         trackingState = camera.trackingState
-        guard isScanning else { return }
-        switch camera.trackingState {
-        case .notAvailable,
-             .limited(.excessiveMotion),
-             .limited(.insufficientFeatures),
-             .limited(.relocalizing):
-            hadLimitedTracking = true
-        default:
-            break
-        }
     }
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        guard isScanning, frame.timestamp - lastDepthSample > 0.2 else { return }
-        lastDepthSample = frame.timestamp
-        distanceToSurface = centreDepth(of: frame)
+        guard isCapturing else { return }
+
+        let tooFast = isMovingTooFast(frame)
+        if movingTooFast != tooFast { movingTooFast = tooFast }
+
+        // only fuse frames with solid tracking, steady motion, and when the previous frame is done
+        guard case .normal = frame.camera.trackingState, !tooFast, !isBusy,
+              let snapshot = DepthSnapshot(frame: frame) else { return }
+
+        if frame.timestamp - lastDistanceSample > 0.2 {
+            lastDistanceSample = frame.timestamp
+            distanceToSurface = snapshot.centreDepth()
+        }
+
+        isBusy = true
+        let currentPhase = phase
+        let generation = scanGeneration
+        processing.async { [weak self] in
+            guard let self else { return }
+            switch currentPhase {
+            case .locatingSurface:
+                let points = snapshot.sparsePoints(step: 3, range: 0.2...2.0)
+                let surface = SurfaceLocator.locate(points: points, camera: snapshot.cameraTransform)
+                if let surface { self.grid = HeightmapGrid(frame: surface) }
+                DispatchQueue.main.async {
+                    self.isBusy = false
+                    guard generation == self.scanGeneration else { return }
+                    if surface != nil, case .locatingSurface = self.phase { self.phase = .scanning }
+                }
+
+            case .scanning:
+                let used = self.grid?.integrate(snapshot) ?? 0
+                var preview: CGImage?
+                if snapshot.timestamp - self.lastPreview > 0.4 {
+                    self.lastPreview = snapshot.timestamp
+                    preview = self.grid?.previewImage()
+                }
+                DispatchQueue.main.async {
+                    self.isBusy = false
+                    guard generation == self.scanGeneration, case .scanning = self.phase else { return }
+                    if used > 0 { self.fusedFrames += 1 }
+                    if let preview {
+                        self.coveragePreview = UIImage(cgImage: preview)
+                        self.framesIntegrated = self.fusedFrames
+                    }
+                }
+
+            default:
+                DispatchQueue.main.async { self.isBusy = false }
+            }
+        }
     }
 
-    private func centreDepth(of frame: ARFrame) -> Float? {
-        guard let depthData = frame.smoothedSceneDepth ?? frame.sceneDepth,
-              let confidenceMap = depthData.confidenceMap else { return nil }
-        let depthMap = depthData.depthMap
+    private func isMovingTooFast(_ frame: ARFrame) -> Bool {
+        defer { lastPose = (frame.timestamp, frame.camera.transform) }
+        guard let last = lastPose else { return false }
+        let dt = Float(frame.timestamp - last.time)
+        guard dt > 0 else { return false }
 
-        CVPixelBufferLockBaseAddress(depthMap, .readOnly)
-        CVPixelBufferLockBaseAddress(confidenceMap, .readOnly)
-        defer {
-            CVPixelBufferUnlockBaseAddress(depthMap, .readOnly)
-            CVPixelBufferUnlockBaseAddress(confidenceMap, .readOnly)
-        }
-
-        let x = CVPixelBufferGetWidth(depthMap) / 2
-        let y = CVPixelBufferGetHeight(depthMap) / 2
-        guard let depthBase = CVPixelBufferGetBaseAddress(depthMap),
-              let confidenceBase = CVPixelBufferGetBaseAddress(confidenceMap) else { return nil }
-
-        let confidenceRow = confidenceBase.advanced(by: y * CVPixelBufferGetBytesPerRow(confidenceMap))
-        let confidence = confidenceRow.assumingMemoryBound(to: UInt8.self)[x]
-        guard confidence == UInt8(ARConfidenceLevel.high.rawValue) else { return nil }
-
-        let depthRow = depthBase.advanced(by: y * CVPixelBufferGetBytesPerRow(depthMap))
-        return depthRow.assumingMemoryBound(to: Float32.self)[x]
-    }
-}
-
-class ExportViewModel: NSObject, ObservableObject, ARSessionDelegate {
-    @Published var imageViewHeight: CGFloat = 0
-    @Published var exportedURL: URL?
-
-    func convertToAsset(meshAnchors: [ARMeshAnchor]) -> MDLAsset? {
-        guard let device = MTLCreateSystemDefaultDevice() else { return nil }
-
-        let asset = MDLAsset()
-
-        for anchor in meshAnchors {
-            let mdlMesh = anchor.geometry.toMDLMesh(device: device, modelMatrix: anchor.transform)
-            asset.add(mdlMesh)
-        }
-
-        return asset
-    }
-
-    // What is an mdl asset? -> An indexed container for 3D objects and associated information, such as transform hierarchies, meshes, cameras, and lights
-    @discardableResult
-    func export(asset: MDLAsset, fileName: String) throws -> URL {
-        guard let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
-            throw NSError(domain: "com.original.VirtualShowrooms", code: 153)
-        }
-
-        let folderName = "OBJ_FILES" // Replace with the desired folder name
-        let folderURL = directory.appendingPathComponent(folderName)
-
-        // Create the folder if it doesn't exist
-        try? FileManager.default.createDirectory(at: folderURL, withIntermediateDirectories: true, attributes: nil)
-
-//        if fileName is "", use default UUID
-        let url = folderURL.appendingPathComponent("\( fileName.isEmpty ? UUID().uuidString : fileName ).obj")
-
-        do {
-            try asset.export(to: url)
-            print("Object saved successfully at: ", url)
-
-            return url
-        } catch {
-            print("Error saving .obj file \(error)")
-        }
-
-        return url
+        let a = last.transform, b = frame.camera.transform
+        let speed = simd_distance(SIMD3(a.columns.3.x, a.columns.3.y, a.columns.3.z),
+                                  SIMD3(b.columns.3.x, b.columns.3.y, b.columns.3.z)) / dt
+        var angle = (simd_quatf(b) * simd_quatf(a).inverse).angle
+        if angle > .pi { angle = 2 * .pi - angle }
+        return speed > Self.maxSpeed || angle / dt > Self.maxAngularSpeed
     }
 }

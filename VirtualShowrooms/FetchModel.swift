@@ -106,7 +106,10 @@ struct FetchModelView: View {
             print("Error removing file: \(error)")
         }
 
-        // detailed captures keep their source photos alongside; remove those too
+        // pothole scans keep their measurements in a matching .json
+        try? FileManager.default.removeItem(at: fileURL.deletingPathExtension().appendingPathExtension("json"))
+
+        // older Object Capture scans kept their source photos; remove those too
         if fileURL.pathExtension.lowercased() == "usdz" {
             let captureFolder = directory.appendingPathComponent("CAPTURES")
                 .appendingPathComponent(fileURL.deletingPathExtension().lastPathComponent)
