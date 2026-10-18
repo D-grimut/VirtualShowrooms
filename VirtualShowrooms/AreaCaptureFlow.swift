@@ -45,6 +45,12 @@ final class AreaCaptureModel: ObservableObject {
         }
         self.name = name.isEmpty ? UUID().uuidString : name
 
+        // Object Capture refuses to start with less than ~4 GB free
+        if let free = Self.freeBytes(at: documents), free < Self.requiredFreeBytes {
+            phase = .failed(Self.storageMessage(free: free))
+            return
+        }
+
         // photos are kept per capture so they can be reprocessed at full detail on a Mac later
         let folder = documents.appendingPathComponent("CAPTURES", isDirectory: true)
             .appendingPathComponent(self.name, isDirectory: true)
@@ -122,11 +128,32 @@ final class AreaCaptureModel: ObservableObject {
         case .failed(let error):
             tearDownSession()
             if !cancelled {
-                phase = .failed(error.localizedDescription)
+                if let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first,
+                   let free = Self.freeBytes(at: documents), free < Self.requiredFreeBytes {
+                    phase = .failed(Self.storageMessage(free: free))
+                } else {
+                    phase = .failed(error.localizedDescription)
+                }
             }
         default:
             break
         }
+    }
+
+    private static let requiredFreeBytes: Int64 = 4_000_000_000
+
+    private static func freeBytes(at url: URL) -> Int64? {
+        guard let values = try? url.resourceValues(forKeys: [.volumeAvailableCapacityKey]),
+              let capacity = values.volumeAvailableCapacity else { return nil }
+        return Int64(capacity)
+    }
+
+    private static func storageMessage(free: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        let have = formatter.string(fromByteCount: free)
+        let need = formatter.string(fromByteCount: requiredFreeBytes)
+        return "Detailed scanning needs at least \(need) of free storage (this device has \(have)). Free up space in Settings › General › iPhone Storage, or delete old exports, then try again."
     }
 
     private static func isLive(_ state: ObjectCaptureSession.CaptureState) -> Bool {
