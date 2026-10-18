@@ -14,6 +14,7 @@ final class AreaCaptureModel: ObservableObject {
     enum Phase {
         case naming
         case capturing
+        case finishing
         case processing(Double)
         case done
         case failed(String)
@@ -22,6 +23,8 @@ final class AreaCaptureModel: ObservableObject {
     @Published var phase: Phase = .naming
     @Published var session: ObjectCaptureSession?
     @Published var feedback: Set<ObjectCaptureSession.Feedback> = []
+    // true only while the session is actually capturing; ObjectCaptureView must not exist outside that window
+    @Published var isViewLive = false
 
     static var isSupported: Bool {
         ObjectCaptureSession.isSupported && PhotogrammetrySession.isSupported
@@ -72,7 +75,9 @@ final class AreaCaptureModel: ObservableObject {
         })
         tasks.append(Task { [weak self] in
             for await feedback in session.feedbackUpdates {
-                self?.feedback = feedback
+                // a publish re-renders ObjectCaptureView, which traps if the session has already ended
+                guard let self, self.isViewLive, Self.isLive(session.state) else { continue }
+                self.feedback = feedback
             }
         })
 
@@ -80,13 +85,26 @@ final class AreaCaptureModel: ObservableObject {
     }
 
     func finish() {
-        session?.finish()
+        // take ObjectCaptureView off screen before the session winds down, then finish
+        isViewLive = false
+        feedback = []
+        phase = .finishing
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            self?.session?.finish()
+        }
     }
 
     func cancel() {
         cancelled = true
-        session?.cancel()
-        tearDownSession()
+        isViewLive = false
+        feedback = []
+        phase = .finishing
+        Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(150))
+            self?.session?.cancel()
+            self?.tearDownSession()
+        }
     }
 
     private func handle(state: ObjectCaptureSession.CaptureState) {
@@ -94,9 +112,13 @@ final class AreaCaptureModel: ObservableObject {
         case .ready:
             // area mode: skip object detection / bounding box and start capturing straight away
             session?.startCapturing()
+        case .capturing:
+            isViewLive = true
         case .completed:
             tearDownSession()
-            Task { await reconstruct() }
+            if !cancelled {
+                Task { await reconstruct() }
+            }
         case .failed(let error):
             tearDownSession()
             if !cancelled {
@@ -107,12 +129,20 @@ final class AreaCaptureModel: ObservableObject {
         }
     }
 
+    private static func isLive(_ state: ObjectCaptureSession.CaptureState) -> Bool {
+        switch state {
+        case .ready, .detecting, .capturing: return true
+        default: return false
+        }
+    }
+
     // only one of ObjectCaptureSession / PhotogrammetrySession may run at a time on device
     private func tearDownSession() {
+        isViewLive = false
         tasks.forEach { $0.cancel() }
         tasks = []
-        session = nil
         feedback = []
+        session = nil
     }
 
     private func reconstruct() async {
@@ -167,11 +197,19 @@ struct AreaCaptureFlow: View {
             case .naming:
                 namingCard
             case .capturing:
-                if let session = model.session {
+                if model.isViewLive, let session = model.session {
                     ObjectCaptureView(session: session)
                         .ignoresSafeArea()
+                    captureControls
+                } else {
+                    ProgressView("Starting camera…")
+                        .tint(.white)
+                        .foregroundColor(.white)
                 }
-                captureControls
+            case .finishing:
+                ProgressView("Saving photos…")
+                    .tint(.white)
+                    .foregroundColor(.white)
             case .processing(let fraction):
                 card {
                     Text("Building detailed model…").font(.headline)
@@ -242,7 +280,8 @@ struct AreaCaptureFlow: View {
             HStack(spacing: 12) {
                 Button(action: {
                     model.cancel()
-                    dismiss()
+                    // dismiss once the capture view is gone and the session has been cancelled
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { dismiss() }
                 }) {
                     Text("Cancel").frame(maxWidth: .infinity)
                 }

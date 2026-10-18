@@ -17,7 +17,7 @@ enum ScanMode: String, CaseIterable, Identifiable {
 struct ContentView: View {
     @StateObject private var scan = ScanController()
     @State private var showFiles = false
-    @State private var mode: ScanMode = .quick
+    @State private var mode: ScanMode = .detailed
     @State private var showAreaCapture = false
 
     var body: some View {
