@@ -72,7 +72,7 @@ struct FetchModelView: View {
         do {
             let fileURLs = try FileManager.default.contentsOfDirectory(at: folderURL, includingPropertiesForKeys: nil)
             let filteredURLs = fileURLs.filter { (url) -> Bool in
-                return url.pathExtension == "obj"
+                return ["obj", "usdz"].contains(url.pathExtension.lowercased())
             }
             
             self.fileNames = filteredURLs.map { $0.lastPathComponent }
@@ -105,7 +105,14 @@ struct FetchModelView: View {
         } catch {
             print("Error removing file: \(error)")
         }
-        
+
+        // detailed captures keep their source photos alongside; remove those too
+        if fileURL.pathExtension.lowercased() == "usdz" {
+            let captureFolder = directory.appendingPathComponent("CAPTURES")
+                .appendingPathComponent(fileURL.deletingPathExtension().lastPathComponent)
+            try? FileManager.default.removeItem(at: captureFolder)
+        }
+
     }
 }
 

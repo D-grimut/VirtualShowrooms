@@ -17,54 +17,66 @@ extension ARMeshGeometry {
         return vertex
     }
 
+    func normal(at index: UInt32) -> SIMD3<Float> {
+        assert(normals.format == MTLVertexFormat.float3, "Expected three floats (twelve bytes) per normal.")
+        let normalPointer = normals.buffer.contents().advanced(by: normals.offset + (normals.stride * Int(index)))
+        let normal = normalPointer.assumingMemoryBound(to: SIMD3<Float>.self).pointee
+        return normal
+    }
+
     // helps from StackOverflow:
     // https://stackoverflow.com/questions/61063571/arkit-3-5-how-to-export-obj-from-new-ipad-pro-with-lidar
-    func toMDLMesh(device: MTLDevice, camera: ARCamera, modelMatrix: simd_float4x4) -> MDLMesh {
-        func convertVertexLocalToWorld() {
-            let verticesPointer = vertices.buffer.contents()
+    // Copies the anchor's geometry into world space. ARKit's buffers are read-only to us,
+    // so positions and normals are written into a new interleaved buffer instead.
+    func toMDLMesh(device: MTLDevice, modelMatrix: simd_float4x4) -> MDLMesh {
+        let rotation = simd_float3x3(
+            SIMD3<Float>(modelMatrix.columns.0.x, modelMatrix.columns.0.y, modelMatrix.columns.0.z),
+            SIMD3<Float>(modelMatrix.columns.1.x, modelMatrix.columns.1.y, modelMatrix.columns.1.z),
+            SIMD3<Float>(modelMatrix.columns.2.x, modelMatrix.columns.2.y, modelMatrix.columns.2.z)
+        )
 
-            for vertexIndex in 0..<vertices.count {
-                let vertex = self.vertex(at: UInt32(vertexIndex))
-                
-                var vertexLocalTransform = matrix_identity_float4x4
-                vertexLocalTransform.columns.3 = SIMD4<Float>(x: vertex.x, y: vertex.y, z: vertex.z, w: 1)
-                let vertexWorldPosition = (modelMatrix * vertexLocalTransform).columns.3
-                
-                let vertexOffset = vertices.offset + vertices.stride * vertexIndex
-                let componentStride = vertices.stride / 3
-                verticesPointer.storeBytes(of: vertexWorldPosition.x, toByteOffset: vertexOffset, as: Float.self)
-                verticesPointer.storeBytes(of: vertexWorldPosition.y, toByteOffset: vertexOffset + componentStride, as: Float.self)
-                verticesPointer.storeBytes(of: vertexWorldPosition.z, toByteOffset: vertexOffset + (2 * componentStride), as: Float.self)
-            }
+        // interleaved [px, py, pz, nx, ny, nz] per vertex
+        var vertexData = [Float]()
+        vertexData.reserveCapacity(vertices.count * 6)
+        for vertexIndex in 0..<UInt32(vertices.count) {
+            let local = vertex(at: vertexIndex)
+            let world = modelMatrix * SIMD4<Float>(local, 1)
+            let worldNormal = simd_normalize(rotation * normal(at: vertexIndex))
+            vertexData.append(contentsOf: [world.x, world.y, world.z, worldNormal.x, worldNormal.y, worldNormal.z])
         }
-        convertVertexLocalToWorld()
-        
-        let allocator = MTKMeshBufferAllocator(device: device);
 
-        let data = Data.init(bytes: vertices.buffer.contents(), count: vertices.stride * vertices.count);
-        let vertexBuffer = allocator.newBuffer(with: data, type: .vertex);
+        let allocator = MTKMeshBufferAllocator(device: device)
 
-        let indexData = Data.init(bytes: faces.buffer.contents(), count: faces.bytesPerIndex * faces.count * faces.indexCountPerPrimitive);
-        let indexBuffer = allocator.newBuffer(with: indexData, type: .index);
+        let data = vertexData.withUnsafeBytes { Data($0) }
+        let vertexBuffer = allocator.newBuffer(with: data, type: .vertex)
+
+        let indexCount = faces.count * faces.indexCountPerPrimitive
+        let indexData = Data(bytes: faces.buffer.contents(), count: faces.bytesPerIndex * indexCount)
+        let indexBuffer = allocator.newBuffer(with: indexData, type: .index)
 
         let submesh = MDLSubmesh(indexBuffer: indexBuffer,
-                                 indexCount: faces.count * faces.indexCountPerPrimitive,
-                                 indexType: .uInt32,
+                                 indexCount: indexCount,
+                                 indexType: faces.bytesPerIndex == 2 ? .uInt16 : .uInt32,
                                  geometryType: .triangles,
-                                 material: nil);
+                                 material: nil)
 
-        let vertexDescriptor = MDLVertexDescriptor();
+        let floatSize = MemoryLayout<Float>.size
+        let vertexDescriptor = MDLVertexDescriptor()
         vertexDescriptor.attributes[0] = MDLVertexAttribute(name: MDLVertexAttributePosition,
                                                             format: .float3,
                                                             offset: 0,
-                                                            bufferIndex: 0);
-        vertexDescriptor.layouts[0] = MDLVertexBufferLayout(stride: vertices.stride);
+                                                            bufferIndex: 0)
+        vertexDescriptor.attributes[1] = MDLVertexAttribute(name: MDLVertexAttributeNormal,
+                                                            format: .float3,
+                                                            offset: 3 * floatSize,
+                                                            bufferIndex: 0)
+        vertexDescriptor.layouts[0] = MDLVertexBufferLayout(stride: 6 * floatSize)
 
         let mesh = MDLMesh(vertexBuffer: vertexBuffer,
-                       vertexCount: vertices.count,
-                       descriptor: vertexDescriptor,
-                       submeshes: [submesh])
-        
+                           vertexCount: vertices.count,
+                           descriptor: vertexDescriptor,
+                           submeshes: [submesh])
+
         return mesh
     }
 }
